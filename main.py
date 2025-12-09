@@ -1,6 +1,8 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+import matplotlib.pyplot as plt
+import os
 
 """
 Goal of this project is to create a neural network that uses stock data as inputs and give an output based on if the stock will increase or decrease in value the next day. 
@@ -9,33 +11,21 @@ Using x stock returns throughout the years, this will be the initial dataset I u
 Stock data used only ever goes up to April 4th, 2020.
 """
 
+# Data Initiation
+
 AAPL = pd.read_csv("AAPL.csv")
 AMC = pd.read_csv("AMC.csv")
 
 def output_data(input_data):
-    np1 = input_data["Open"].shift(-1)
-    n = input_data["Close"]
-    df = pd.DataFrame(columns = ["Signal"])
+    np1 = input_data["Close"].shift(-1).dropna() # next day opening price
+    return np1
 
-    r = np1 - n
-    df["Signal"] = r/abs(r)
-    df["Signal"] = df["Signal"].replace(-1, 0)
-    df["Signal"] = df["Signal"].astype(bool)
-    return df["Signal"]
+def input_data(df):
+    return df[["Open", "High", "Low", "Close", "Volume"]].dropna()[:len(df)-1]
 
-def input_data(raw_data, ndays = 5):
-    # x = raw_data.copy()
-    x = pd.DataFrame(columns = ["Dev", "Mean Value"])
-    x["Dev"] = raw_data["High"] - raw_data["Low"]
-    x["Std of Dev"] = x["Dev"].rolling(ndays).std()
-    x["Mean Dev"] = x["Dev"].rolling(ndays).mean()
-    x["Std"] = raw_data ["Close"].rolling(ndays).std()
-    x["Std of Std"] = x["Std"].rolling(ndays).std()
-    return x
-
-def data_gen(raw_data, ndays = 5, split_ratio = .2):
-    x = input_data(raw_data, ndays)[ndays*2:-2]
-    y = output_data(raw_data)[ndays*2:-2]
+def data_gen(raw_data, split_ratio = .1):
+    x = input_data(raw_data)
+    y = output_data(raw_data)
 
     split_at = round(len(x)*(1-split_ratio))
     xtest, ytest = x[split_at:], y[split_at:]
@@ -45,51 +35,70 @@ def data_gen(raw_data, ndays = 5, split_ratio = .2):
 
 
 #Creating the neural network model
+def base_model():
+    
+    model = tf.keras.Sequential([
+        tf.keras.layers.Dense(256, activation = "linear"),
+        tf.keras.layers.Dense(256, activation = "elu"),
+        tf.keras.layers.Dense(1)])
 
-xtrain, xtest, ytrain, ytest = data_gen(AAPL)
+    model.compile(
+        optimizer = "adam",
+        loss = "MSE",
+        metrics = ["MSE"]
+    )   
+    return model
 
-model = tf.keras.Sequential([
-    tf.keras.layers.Dense(256, activation = "relu", input_dim = len(xtrain.columns)),
-    tf.keras.layers.Dense(256, activation = "tanh"),
-    tf.keras.layers.Dense(1, activation = "sigmoid")
-])
+@tf.keras.utils.register_keras_serializable("pinn_loss")
+def PINN_loss(y_true, y_pred):
+    mean = tf.reduce_mean(y_true)
+    stdev = tf.math.reduce_std(y_true)
+    MSE = tf.square(y_true - y_pred)
+    PDF = (1/tf.sqrt(2*np.pi*tf.square(stdev)))*tf.exp(-tf.square(y_pred-mean)/(2*tf.square(stdev)))
+    return (MSE + (MSE * (1-PDF)))
 
-model.compile(
-    optimizer = "sgd",
-    loss = "binary_crossentropy",
-    metrics = ["accuracy"]
-)
+def PINN_model():
+    model = tf.keras.Sequential([
+        tf.keras.layers.Dense(256, activation = "linear"),
+        tf.keras.layers.Dense(256, activation = "elu"),
+        tf.keras.layers.Dense(1)])
 
-model.fit(
-    x = xtrain, y = ytrain, epochs = 20
-)
+    model.compile(
+        optimizer = "adam",
+        loss = PINN_loss,
+        metrics = ["MSE"]
+    )   
+    return model
 
-# Testing for generalization
+def model_training(data, model = base_model()):
+    checkpoint_path = "weights/base.keras"
+    checkpoint_dir = os.path.dirname(checkpoint_path)
 
-def generalization_eval(dataframe):
+    cp_callback = tf.keras.callbacks.ModelCheckpoint(filepath = checkpoint_path,
+                                                     save_best_only=True,
+                                                     monitor = "loss",
+                                                     verbose = 1)
+    
+    xtrain, xtest, ytrain, ytest = data_gen(data)
 
-    x = input_data(dataframe)
-    y = output_data(dataframe)
+    model.fit(xtrain,
+              ytrain,
+              epochs = 500,
+              callbacks = [cp_callback]
+            )
+    
+    return model
 
-    y_hat = model.predict(x)
-    y_hat = [0 if val < 0.5 else 1 for val in y_hat]
+# Testing Area
+# model = model_training(AAPL)
 
-    correct = sum(y == y_hat)
-    total = len(y)
-    per_correct = correct/total
-    out = output_ratio(y_hat)
-
-    return(per_correct*100, out)
-
-def output_ratio(y_hat):
-    pos = sum(y_hat)
-    neg = len(y_hat) - pos
-    if neg == 0:
-        return np.inf
-    else:
-        return pos/neg
-
-correct, outrat = generalization_eval(AMC)
-print(correct, outrat)
-
-# Model has optimized to exclusively predict 1, not accurately reflecting an intuitive approach.
+model = tf.keras.models.load_model("weights/PINN.keras")
+AAPL_raw = pd.read_csv("AMC.csv")
+AAPL_input = input_data(AAPL_raw)
+AAPL_output = output_data(AAPL_raw)
+AAPL_predictions = model.predict(AAPL_input)
+model.evaluate(AAPL_input, AAPL_output)
+plt.plot(AAPL_predictions, color = "r")
+plt.plot(AAPL_output, color = "y")
+plt.legend()
+plt.show()
